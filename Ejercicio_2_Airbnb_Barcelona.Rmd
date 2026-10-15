@@ -1,0 +1,588 @@
+---
+title: "Ejercicio 2 - Preparación, análisis e interpretación de datos"
+author: "Repositorio itaniano11/Mineria_de_datos_pec1"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 3
+lang: es
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# 1. Objetivo y contexto
+
+En este informe se realiza la preparación y el análisis exploratorio del dataset **Airbnb Data: Barcelona 5Y (2021–2026)** (`listings_monthly.csv`) para dejar un conjunto preparado para tareas posteriores de minería de datos.
+
+Se sigue la estructura del ejemplo guiado, pero adaptando variables, decisiones y conclusiones al dataset real del repositorio.
+
+# 2. Paquetes y lectura reproducible
+
+```{r paquetes}
+required_packages <- c("dplyr", "ggplot2", "tidyr", "lubridate", "stringr", "scales")
+missing_packages <- required_packages[!sapply(required_packages, requireNamespace, quietly = TRUE)]
+
+if (length(missing_packages) > 0) {
+  message("Paquetes no disponibles (continuará con alternativas base cuando sea posible): ",
+          paste(missing_packages, collapse = ", "))
+}
+
+safe_library <- function(pkg) {
+  if (requireNamespace(pkg, quietly = TRUE)) {
+    suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+    return(TRUE)
+  }
+  FALSE
+}
+
+loaded <- sapply(required_packages, safe_library)
+loaded
+```
+
+```{r lectura-datos}
+# Ruta reproducible: prioriza ejecución desde la raíz del repositorio
+candidate_paths <- c(
+  file.path(getwd(), "listings_monthly.csv"),
+  "listings_monthly.csv",
+  file.path("..", "listings_monthly.csv")
+)
+
+data_path <- candidate_paths[file.exists(candidate_paths)][1]
+
+if (is.na(data_path) || is.null(data_path)) {
+  stop("No se encuentra 'listings_monthly.csv'. Ejecuta el informe desde la raíz del repositorio o ajusta la ruta.")
+}
+
+airbnb_raw <- read.csv(data_path, stringsAsFactors = FALSE, check.names = FALSE)
+
+cat("Ruta utilizada:", normalizePath(data_path, winslash = "/"), "\n")
+cat("Dimensiones iniciales (filas, columnas):", nrow(airbnb_raw), ncol(airbnb_raw), "\n")
+```
+
+# 3. Limpieza inicial obligatoria: variables *native*
+
+Como primer paso, se eliminan las columnas `native_avg_daily_rate`, `native_revenue` y `native_revpar`. Estas métricas están en moneda nativa y son redundantes respecto a las versiones normalizadas (`avg_daily_rate`, `revenue`, `revpar`) en este dataset, por lo que se excluyen para evitar duplicidad.
+
+```{r limpieza-native}
+native_cols <- c("native_avg_daily_rate", "native_revenue", "native_revpar")
+existing_native <- intersect(native_cols, names(airbnb_raw))
+missing_native <- setdiff(native_cols, names(airbnb_raw))
+
+cat("Variables native requeridas:\n")
+print(native_cols)
+cat("Encontradas y eliminadas:\n")
+print(existing_native)
+
+if (length(missing_native) > 0) {
+  cat("No encontradas (no se eliminan porque no existen):\n")
+  print(missing_native)
+}
+
+airbnb <- airbnb_raw
+if (length(existing_native) > 0) {
+  airbnb <- airbnb[, !(names(airbnb) %in% existing_native), drop = FALSE]
+}
+
+cat("Dimensiones tras eliminar native (filas, columnas):", nrow(airbnb), ncol(airbnb), "\n")
+```
+
+# 4. Análisis exploratorio completo
+
+## 4.1 Registros y variables antes/después
+
+```{r dimensiones-antes-despues}
+dim_before <- c(nrow(airbnb_raw), ncol(airbnb_raw))
+dim_after  <- c(nrow(airbnb), ncol(airbnb))
+
+data.frame(
+  estado = c("Antes", "Después"),
+  filas = c(dim_before[1], dim_after[1]),
+  columnas = c(dim_before[2], dim_after[2])
+)
+```
+
+## 4.2 Estructura, tipos y primeras filas
+
+```{r estructura-head}
+str(airbnb)
+```
+
+```{r primeras-filas}
+head(airbnb, 6)
+```
+
+```{r tipos-variables}
+var_types <- data.frame(
+  variable = names(airbnb),
+  clase = sapply(airbnb, function(x) paste(class(x), collapse = ",")),
+  stringsAsFactors = FALSE
+)
+var_types
+```
+
+## 4.3 Resumen descriptivo
+
+```{r resumen-variables}
+summary(airbnb)
+```
+
+## 4.4 Valores NA, cadenas vacías/blancos y duplicados
+
+```{r calidad-datos}
+na_count <- sapply(airbnb, function(x) sum(is.na(x)))
+blank_count <- sapply(airbnb, function(x) {
+  if (is.character(x)) sum(trimws(x) == "", na.rm = TRUE) else 0
+})
+
+quality_table <- data.frame(
+  variable = names(airbnb),
+  na = as.integer(na_count),
+  blancos = as.integer(blank_count),
+  pct_na = round(100 * na_count / nrow(airbnb), 2),
+  pct_blancos = round(100 * blank_count / nrow(airbnb), 2),
+  stringsAsFactors = FALSE
+)
+
+quality_table[order(-quality_table$na, -quality_table$blancos), ]
+```
+
+```{r duplicados}
+duplicated_rows <- sum(duplicated(airbnb))
+cat("Filas duplicadas exactas:", duplicated_rows, "\n")
+
+if ("listing_id" %in% names(airbnb) && "month_date" %in% names(airbnb)) {
+  key_dups <- sum(duplicated(airbnb[, c("listing_id", "month_date")]))
+  cat("Duplicados de clave potencial (listing_id, month_date):", key_dups, "\n")
+}
+```
+
+## 4.5 Variables constantes, identificadores y alta cardinalidad
+
+```{r cardinalidad}
+cardinality <- sapply(airbnb, function(x) length(unique(x[!is.na(x)])))
+const_vars <- names(cardinality[cardinality <= 1])
+high_card_vars <- names(cardinality[cardinality > 0.95 * nrow(airbnb)])
+
+card_df <- data.frame(
+  variable = names(cardinality),
+  n_distinct = as.integer(cardinality),
+  ratio_distinct = round(as.numeric(cardinality) / nrow(airbnb), 4),
+  stringsAsFactors = FALSE
+)
+card_df[order(-card_df$ratio_distinct), ]
+
+cat("\nVariables constantes:\n")
+print(const_vars)
+cat("\nPosibles identificadores/alta cardinalidad:\n")
+print(high_card_vars)
+```
+
+# 5. Diccionario de datos adaptado al CSV real
+
+```{r diccionario-datos}
+data_dictionary <- data.frame(
+  variable = c(
+    "listing_id", "host_id", "month_date",
+    "listing_type", "room_type", "property_type", "neighborhood", "country", "currency",
+    "latitude", "longitude",
+    "guests", "bedrooms", "beds", "baths",
+    "available_days", "unavailable_days", "occupancy", "active",
+    "avg_daily_rate", "revenue", "revpar",
+    "booking_lead_time_avg", "length_of_stay_avg", "booked_rate_avg",
+    "num_reviews", "star_rating", "superhost"
+  ),
+  grupo = c(
+    "Identificación", "Identificación", "Temporal",
+    "Clasificación", "Clasificación", "Clasificación", "Localización", "Localización", "Localización",
+    "Localización", "Localización",
+    "Capacidad", "Capacidad", "Capacidad", "Capacidad",
+    "Disponibilidad/Ocupación", "Disponibilidad/Ocupación", "Disponibilidad/Ocupación", "Disponibilidad/Ocupación",
+    "Precio/Ingresos", "Precio/Ingresos", "Precio/Ingresos",
+    "Reserva", "Reserva", "Reserva",
+    "Reseñas", "Reseñas", "Reseñas"
+  ),
+  descripcion = c(
+    "Identificador del anuncio.",
+    "Identificador del anfitrión.",
+    "Mes de observación del registro.",
+    "Descripción del tipo de anuncio.",
+    "Tipo de habitación (p. ej., private_room, entire_home_apt).",
+    "Categoría de propiedad.",
+    "Barrio del anuncio.",
+    "País.",
+    "Moneda del registro.",
+    "Latitud.",
+    "Longitud.",
+    "Capacidad de huéspedes.",
+    "Número de dormitorios.",
+    "Número de camas.",
+    "Número de baños.",
+    "Días disponibles del mes.",
+    "Días no disponibles del mes.",
+    "Ocupación mensual (proporción).",
+    "Indicador de anuncio activo.",
+    "Tarifa media diaria.",
+    "Ingresos mensuales estimados.",
+    "Revenue per available room (ingreso por unidad disponible).",
+    "Antelación media de reserva.",
+    "Duración media de estancia.",
+    "Tasa media de reserva.",
+    "Número de reseñas.",
+    "Valoración media.",
+    "Indicador de superhost."
+  ),
+  stringsAsFactors = FALSE
+)
+
+data_dictionary
+```
+
+# 6. Selección numérica y visualizaciones robustas
+
+```{r seleccion-numericas}
+numeric_vars_all <- names(airbnb)[sapply(airbnb, is.numeric)]
+id_like <- c("listing_id")
+numeric_vars <- setdiff(numeric_vars_all, id_like)
+
+cat("Variables numéricas detectadas:\n")
+print(numeric_vars)
+
+summary(airbnb[, numeric_vars, drop = FALSE])
+```
+
+```{r distribuciones-y-outliers}
+if (nrow(airbnb) > 0 && length(numeric_vars) > 0) {
+  for (v in numeric_vars) {
+    x <- airbnb[[v]]
+    x <- x[is.finite(x)]
+    if (length(x) > 5) {
+      q <- quantile(x, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+      iqr <- q[3] - q[1]
+      lower <- q[1] - 1.5 * iqr
+      upper <- q[3] + 1.5 * iqr
+      out_n <- sum(x < lower | x > upper, na.rm = TRUE)
+      cat(sprintf("%s -> mediana=%.3f, IQR=%.3f, outliers(IQR)=%d\n", v, q[2], iqr, out_n))
+    }
+  }
+}
+```
+
+```{r plots-numericos, fig.width=11, fig.height=8}
+plot_vars <- intersect(c("avg_daily_rate", "revenue", "occupancy", "guests", "bedrooms", "num_reviews"), names(airbnb))
+
+if (length(plot_vars) > 0 && requireNamespace("ggplot2", quietly = TRUE) && requireNamespace("tidyr", quietly = TRUE)) {
+  plt_df <- tidyr::pivot_longer(airbnb[, plot_vars, drop = FALSE],
+                                cols = tidyselect::all_of(plot_vars),
+                                names_to = "variable",
+                                values_to = "valor")
+  ggplot2::ggplot(plt_df, ggplot2::aes(x = valor)) +
+    ggplot2::geom_histogram(bins = 40, fill = "steelblue", color = "white") +
+    ggplot2::facet_wrap(~ variable, scales = "free", ncol = 3) +
+    ggplot2::theme_minimal() +
+    ggplot2::labs(title = "Distribuciones de variables numéricas seleccionadas", x = NULL, y = "Frecuencia")
+} else if (length(plot_vars) > 0) {
+  op <- par(mfrow = c(2, 3))
+  for (v in plot_vars) {
+    hist(airbnb[[v]], breaks = 30, main = paste("Hist:", v), xlab = v, col = "lightblue")
+  }
+  par(op)
+}
+```
+
+# 7. Variables derivadas/codificadas (con comprobaciones)
+
+```{r variables-derivadas}
+airbnb_feat <- airbnb
+
+if ("month_date" %in% names(airbnb_feat)) {
+  airbnb_feat$month_date_parsed <- as.Date(airbnb_feat$month_date)
+  airbnb_feat$year <- as.integer(format(airbnb_feat$month_date_parsed, "%Y"))
+  airbnb_feat$month <- as.integer(format(airbnb_feat$month_date_parsed, "%m"))
+}
+
+if (all(c("available_days", "unavailable_days") %in% names(airbnb_feat))) {
+  total_days <- airbnb_feat$available_days + airbnb_feat$unavailable_days
+  airbnb_feat$availability_ratio <- ifelse(total_days > 0, airbnb_feat$available_days / total_days, NA_real_)
+  airbnb_feat$unavailability_ratio <- ifelse(total_days > 0, airbnb_feat$unavailable_days / total_days, NA_real_)
+}
+
+if ("avg_daily_rate" %in% names(airbnb_feat)) {
+  q_price <- quantile(airbnb_feat$avg_daily_rate, probs = c(0.33, 0.66), na.rm = TRUE)
+  airbnb_feat$price_band <- cut(
+    airbnb_feat$avg_daily_rate,
+    breaks = c(-Inf, q_price[1], q_price[2], Inf),
+    labels = c("Bajo", "Medio", "Alto"),
+    include.lowest = TRUE
+  )
+}
+
+if ("guests" %in% names(airbnb_feat)) {
+  airbnb_feat$capacity_band <- cut(
+    airbnb_feat$guests,
+    breaks = c(-Inf, 2, 4, 6, Inf),
+    labels = c("1-2", "3-4", "5-6", "7+"),
+    include.lowest = TRUE
+  )
+}
+
+if ("active" %in% names(airbnb_feat)) {
+  airbnb_feat$active_flag <- ifelse(tolower(as.character(airbnb_feat$active)) %in% c("true", "1", "yes"), 1L, 0L)
+}
+
+if ("superhost" %in% names(airbnb_feat)) {
+  airbnb_feat$superhost_flag <- ifelse(tolower(as.character(airbnb_feat$superhost)) %in% c("true", "1", "yes"), 1L, 0L)
+}
+
+new_cols <- setdiff(names(airbnb_feat), names(airbnb))
+cat("Variables derivadas creadas:\n")
+print(new_cols)
+```
+
+# 8. Relaciones relevantes para el objetivo analítico
+
+## 8.1 Evolución temporal
+
+```{r evolucion-temporal, fig.width=10, fig.height=6}
+if (all(c("month_date_parsed", "occupancy") %in% names(airbnb_feat)) && requireNamespace("ggplot2", quietly = TRUE)) {
+  trend_occ <- airbnb_feat |>
+    dplyr::filter(!is.na(month_date_parsed), !is.na(occupancy)) |>
+    dplyr::group_by(month_date_parsed) |>
+    dplyr::summarise(occupancy_media = mean(occupancy, na.rm = TRUE), .groups = "drop")
+
+  ggplot2::ggplot(trend_occ, ggplot2::aes(x = month_date_parsed, y = occupancy_media)) +
+    ggplot2::geom_line(color = "darkorange", linewidth = 0.8) +
+    ggplot2::theme_minimal() +
+    ggplot2::labs(title = "Evolución temporal de la ocupación media", x = "Mes", y = "Ocupación media")
+}
+```
+
+## 8.2 Diferencias geográficas (si existen)
+
+```{r diferencias-geograficas, fig.width=10, fig.height=6}
+if (all(c("neighborhood", "avg_daily_rate") %in% names(airbnb_feat)) && requireNamespace("ggplot2", quietly = TRUE)) {
+  top_neigh <- airbnb_feat |>
+    dplyr::filter(!is.na(neighborhood), neighborhood != "") |>
+    dplyr::count(neighborhood, sort = TRUE) |>
+    dplyr::slice_head(n = 12) |>
+    dplyr::pull(neighborhood)
+
+  geo_df <- airbnb_feat |>
+    dplyr::filter(neighborhood %in% top_neigh)
+
+  ggplot2::ggplot(geo_df, ggplot2::aes(x = reorder(neighborhood, avg_daily_rate, median, na.rm = TRUE), y = avg_daily_rate)) +
+    ggplot2::geom_boxplot(fill = "lightblue", outlier.alpha = 0.2) +
+    ggplot2::coord_flip() +
+    ggplot2::theme_minimal() +
+    ggplot2::labs(title = "Precio diario por barrio (top 12 en registros)", x = "Barrio", y = "Tarifa diaria media")
+}
+```
+
+## 8.3 Precio, ocupación, revenue y capacidad
+
+```{r relaciones-principales, fig.width=11, fig.height=8}
+rel_cols <- intersect(c("avg_daily_rate", "occupancy", "revenue", "guests", "num_reviews", "length_of_stay_avg"), names(airbnb_feat))
+if (length(rel_cols) >= 2 && requireNamespace("ggplot2", quietly = TRUE)) {
+  pairs_df <- airbnb_feat[, rel_cols, drop = FALSE]
+  pairs_df <- pairs_df[stats::complete.cases(pairs_df), , drop = FALSE]
+
+  if (nrow(pairs_df) > 10) {
+    if (requireNamespace("GGally", quietly = TRUE)) {
+      print(GGally::ggpairs(pairs_df, progress = FALSE))
+    } else if (all(c("avg_daily_rate", "occupancy") %in% names(pairs_df))) {
+      ggplot2::ggplot(pairs_df, ggplot2::aes(x = avg_daily_rate, y = occupancy)) +
+        ggplot2::geom_point(alpha = 0.2, color = "darkgreen") +
+        ggplot2::geom_smooth(method = "lm", se = FALSE, color = "black") +
+        ggplot2::theme_minimal() +
+        ggplot2::labs(title = "Relación tarifa diaria y ocupación")
+    }
+  } else {
+    cat("No hay suficientes casos completos para matriz de pares.\n")
+  }
+}
+```
+
+```{r correlaciones}
+corr_cols <- intersect(c("avg_daily_rate", "revenue", "revpar", "occupancy", "guests", "bedrooms", "beds", "baths", "num_reviews", "star_rating", "booking_lead_time_avg", "length_of_stay_avg", "booked_rate_avg"), names(airbnb_feat))
+
+corr_df <- airbnb_feat[, corr_cols, drop = FALSE]
+corr_df <- corr_df[, sapply(corr_df, is.numeric), drop = FALSE]
+
+if (ncol(corr_df) >= 2) {
+  cm <- cor(corr_df, use = "pairwise.complete.obs", method = "pearson")
+  print(round(cm, 3))
+  cat("\nNota: la correlación lineal no implica causalidad y puede estar sesgada por la estructura mensual/panel (múltiples meses por anuncio).\n")
+} else {
+  cat("No hay suficientes variables numéricas válidas para correlación.\n")
+}
+```
+
+# 9. Conjunto final para minería (sin fugas y con tratamiento razonado)
+
+```{r dataset-final-mineria}
+model_df <- airbnb_feat
+
+# Eliminación de columnas redundantes o identificadoras directas
+remove_candidates <- intersect(c("listing_id", "host_id", "month_date", "month_date_parsed", "country", "currency"), names(model_df))
+model_df <- model_df[, !(names(model_df) %in% remove_candidates), drop = FALSE]
+
+# Conversión de lógicos binarios conocidos
+for (v in intersect(c("superhost", "active"), names(model_df))) {
+  model_df[[v]] <- as.integer(tolower(as.character(model_df[[v]])) %in% c("true", "1", "yes"))
+}
+
+# Imputación simple y conservadora en numéricas (mediana)
+num_cols_model <- names(model_df)[sapply(model_df, is.numeric)]
+for (v in num_cols_model) {
+  med <- median(model_df[[v]], na.rm = TRUE)
+  if (is.finite(med)) {
+    model_df[[v]][is.na(model_df[[v]])] <- med
+  }
+}
+
+# Conservamos filas: no se eliminan masivamente; solo se filtran casos imposibles
+if (all(c("available_days", "unavailable_days") %in% names(model_df))) {
+  invalid_days <- (model_df$available_days < 0 | model_df$unavailable_days < 0)
+  invalid_days[is.na(invalid_days)] <- FALSE
+  cat("Registros con días negativos eliminados:", sum(invalid_days), "\n")
+  model_df <- model_df[!invalid_days, , drop = FALSE]
+}
+
+cat("Dimensiones dataset final para minería:", nrow(model_df), "filas y", ncol(model_df), "columnas.\n")
+```
+
+# 10. Discretización y normalización
+
+```{r discretizacion-normalizacion}
+prep_df <- model_df
+
+if ("avg_daily_rate" %in% names(prep_df)) {
+  q <- quantile(prep_df$avg_daily_rate, probs = c(0.25, 0.5, 0.75), na.rm = TRUE)
+  prep_df$avg_daily_rate_disc <- cut(
+    prep_df$avg_daily_rate,
+    breaks = c(-Inf, q[1], q[2], q[3], Inf),
+    labels = c("Q1", "Q2", "Q3", "Q4"),
+    include.lowest = TRUE
+  )
+}
+
+if ("guests" %in% names(prep_df)) {
+  prep_df$guests_disc <- cut(
+    prep_df$guests,
+    breaks = c(-Inf, 2, 4, 6, Inf),
+    labels = c("1-2", "3-4", "5-6", "7+"),
+    include.lowest = TRUE
+  )
+}
+
+scale_candidates <- intersect(c("avg_daily_rate", "revenue", "revpar", "occupancy", "guests", "bedrooms", "beds", "baths", "num_reviews", "booking_lead_time_avg", "length_of_stay_avg", "booked_rate_avg"), names(prep_df))
+
+for (v in scale_candidates) {
+  if (is.numeric(prep_df[[v]]) && sd(prep_df[[v]], na.rm = TRUE) > 0) {
+    prep_df[[paste0(v, "_z")]] <- as.numeric(scale(prep_df[[v]]))
+  }
+}
+
+cat("Variables añadidas por discretización/normalización:\n")
+print(setdiff(names(prep_df), names(model_df)))
+```
+
+# 11. PCA sobre subconjunto numérico preparado
+
+```{r pca}
+pca_cols <- grep("_z$", names(prep_df), value = TRUE)
+
+if (length(pca_cols) >= 3) {
+  pca_data <- prep_df[, pca_cols, drop = FALSE]
+  pca_data <- pca_data[complete.cases(pca_data), , drop = FALSE]
+
+  if (nrow(pca_data) >= 20) {
+    pca_fit <- prcomp(pca_data, center = FALSE, scale. = FALSE)
+    explained <- (pca_fit$sdev^2) / sum(pca_fit$sdev^2)
+    cumulative <- cumsum(explained)
+
+    pca_var <- data.frame(
+      componente = paste0("PC", seq_along(explained)),
+      var_explicada = explained,
+      var_acumulada = cumulative
+    )
+    print(head(pca_var, 10))
+
+    k80 <- which(cumulative >= 0.80)[1]
+    cat("Número mínimo de componentes para >=80% varianza explicada:", k80, "\n")
+
+    plot(explained, type = "b", pch = 19,
+         main = "Varianza explicada por componente (PCA)",
+         xlab = "Componente", ylab = "Proporción de varianza")
+
+    if (requireNamespace("factoextra", quietly = TRUE)) {
+      factoextra::fviz_pca_var(pca_fit, col.var = "contrib")
+      factoextra::fviz_contrib(pca_fit, choice = "var", axes = 1, top = 15)
+      factoextra::fviz_contrib(pca_fit, choice = "var", axes = 2, top = 15)
+    } else {
+      message("Paquete 'factoextra' no disponible: se muestran resultados base de PCA.")
+      biplot(pca_fit, cex = 0.5)
+    }
+  } else {
+    cat("No hay suficientes observaciones completas para PCA robusto.\n")
+  }
+} else {
+  cat("No hay suficientes variables numéricas escaladas para aplicar PCA (mínimo 3).\n")
+}
+```
+
+# 12. Interpretación y conclusiones
+
+Las conclusiones deben basarse en la ejecución real de este documento. Tras ejecutar todos los apartados, conviene interpretar como mínimo:
+
+1. **Calidad del dato**: presencia de NA/blancos, duplicados y variables casi constantes.
+2. **Dinámica temporal**: evolución de ocupación/media de precio por mes.
+3. **Heterogeneidad geográfica**: diferencias por barrio cuando exista volumen suficiente.
+4. **Relación precio-ocupación-ingresos**: señales en dispersión/correlación y sus límites.
+5. **Preparación para minería**: qué variables quedan, cuáles se eliminan por fuga/redundancia y por qué.
+
+En este dataset panel (múltiples observaciones mensuales por anuncio), las asociaciones deben interpretarse con cautela: pueden mezclar efecto temporal, efecto anuncio y efecto barrio.
+
+# 13. Documentación de interacciones con IA generativa
+
+## Interacción 1 (Metodología)
+
+- **Pregunta trasladada a IA**: "¿Cómo estructurar un EDA completo para un dataset mensual de Airbnb sin mezclar identificadores con variables analíticas?"
+- **Respuesta resumida**: Propuesta de flujo: revisión de dimensiones y tipos, calidad (NA, blancos, duplicados), detección de identificadores/alta cardinalidad, análisis numérico y relaciones clave por contexto.
+- **Decisión aplicada**: Se adoptó esa secuencia y se añadieron salvaguardas para columnas opcionales.
+- **Reflexión crítica**: La guía fue útil, pero se ajustó para evitar recomendaciones genéricas no alineadas con columnas reales del CSV.
+
+## Interacción 2 (Programación)
+
+- **Pregunta trasladada a IA**: "¿Cómo escribir código R robusto para crear variables derivadas solo si existen las columnas necesarias?"
+- **Respuesta resumida**: Uso sistemático de `if ("col" %in% names(df))` y `intersect()` antes de transformar.
+- **Decisión aplicada**: Se implementaron comprobaciones previas en limpieza, derivación, correlaciones y PCA.
+- **Reflexión crítica**: Reduce errores en render y mejora portabilidad, a costa de mayor verbosidad en el script.
+
+## Interacción 3 (Diagnóstico)
+
+- **Pregunta trasladada a IA**: "Si el entorno no tiene ciertos paquetes, ¿cómo mantener un informe ejecutable sin instalaciones automáticas?"
+- **Respuesta resumida**: Comprobar paquetes con `requireNamespace()`, cargar condicionalmente y proveer salidas alternativas.
+- **Decisión aplicada**: Se incorporó bloque de carga segura y fallback para PCA/visualizaciones.
+- **Reflexión crítica**: Esta estrategia prioriza reproducibilidad y evita fallos por dependencias, aunque algunas visualizaciones avanzadas pueden omitirse.
+
+## Interacción 4 (Interpretación)
+
+- **Pregunta trasladada a IA**: "¿Qué limitaciones debo explicar al interpretar correlaciones en un panel mensual de anuncios Airbnb?"
+- **Respuesta resumida**: La correlación puede estar influida por estructura temporal y repetición por anuncio; no implica causalidad.
+- **Decisión aplicada**: Se incluyó nota explícita de limitaciones en la sección de correlaciones y conclusiones.
+- **Reflexión crítica**: Evita sobreinterpretar métricas simples y orienta a análisis posteriores (modelos con efectos temporales o jerárquicos).
+
+## Interacción 5 (Extensión)
+
+- **Pregunta trasladada a IA**: "¿Qué extensiones naturales tendría este preprocesado para una siguiente PEC orientada a modelización?"
+- **Respuesta resumida**: Segmentación por perfiles de anuncio, modelos de predicción de ingresos/ocupación y validación temporal.
+- **Decisión aplicada**: Se dejó preparado un dataset con versiones discretizadas y escaladas.
+- **Reflexión crítica**: Las extensiones se consideran hipótesis de trabajo y no se incorporan como resultados cerrados en esta entrega.
+
+# 14. Cierre
+
+Este archivo se ha creado como documento nuevo (`Ejercicio_2_Airbnb_Barcelona.Rmd`) sin sobrescribir el ejemplo original y sin modificar `listings_monthly.csv`.
